@@ -1,0 +1,127 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: payment_db
+      POSTGRES_USER: payment_user
+      POSTGRES_PASSWORD: payment_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d/
+    
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+      
+  api-gateway:
+    build: 
+      context: .
+      dockerfile: cmd/api-gateway/Dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      - DATABASE_URL=postgres://payment_user:payment_pass@postgres:5432/payment_db?sslmode=disable
+      - REDIS_URL=redis://redis:6379
+      - PAYMENT_ORCHESTRATOR_URL=http://payment-orchestrator:8001
+      - SUBSCRIPTION_SERVICE_URL=http://subscription-service:8002
+      - BPAS_SERVICE_URL=http://bpas-service:8003
+    
+  payment-orchestrator:
+    build:
+      context: .
+      dockerfile: cmd/payment-orchestrator/Dockerfile
+    ports:
+      - "8001:8001"
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      - DATABASE_URL=postgres://payment_user:payment_pass@postgres:5432/payment_db?sslmode=disable
+      - REDIS_URL=redis://redis:6379
+      - PROCESSOR_A_URL=http://mock-processor-a:8101
+      - PROCESSOR_B_URL=http://mock-processor-b:8102
+      - NETWORK_TOKEN_URL=http://network-token-service:8103
+      - BPAS_SERVICE_URL=http://bpas-service:8003
+    
+  subscription-service:
+    build:
+      context: .
+      dockerfile: cmd/subscription-service/Dockerfile
+    ports:
+      - "8002:8002"
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      - DATABASE_URL=postgres://payment_user:payment_pass@postgres:5432/payment_db?sslmode=disable
+      - REDIS_URL=redis://redis:6379
+      - PAYMENT_ORCHESTRATOR_URL=http://payment-orchestrator:8001
+      - NETWORK_TOKEN_URL=http://network-token-service:8103
+    
+  bpas-service:
+    build:
+      context: .
+      dockerfile: cmd/bpas-service/Dockerfile
+    ports:
+      - "8003:8003"
+    depends_on:
+      - postgres
+    environment:
+      - DATABASE_URL=postgres://payment_user:payment_pass@postgres:5432/payment_db?sslmode=disable
+      - CONFIG_PATH=/app/configs/routing-rules.yaml
+    volumes:
+      - ./configs:/app/configs
+    
+  mock-processor-a:
+    build:
+      context: .
+      dockerfile: cmd/mock-processor-a/Dockerfile
+    ports:
+      - "8101:8101"
+    environment:
+      - PROCESSOR_NAME=processor_a
+      - SUCCESS_RATE=80
+    
+  mock-processor-b:
+    build:
+      context: .
+      dockerfile: cmd/mock-processor-b/Dockerfile
+    ports:
+      - "8102:8102"
+    environment:
+      - PROCESSOR_NAME=processor_b
+      - SUCCESS_RATE=90
+    
+  network-token-service:
+    build:
+      context: .
+      dockerfile: cmd/network-token-service/Dockerfile
+    ports:
+      - "8103:8103"
+    environment:
+      - NETWORK_TOKEN_SUCCESS_RATE=95
+    
+  mit-scheduler:
+    build:
+      context: .
+      dockerfile: cmd/mit-scheduler/Dockerfile
+    depends_on:
+      - postgres
+      - payment-orchestrator
+    environment:
+      - DATABASE_URL=postgres://payment_user:payment_pass@postgres:5432/payment_db?sslmode=disable
+      - PAYMENT_ORCHESTRATOR_URL=http://payment-orchestrator:8001
+
+volumes:
+  postgres_data:
+  redis_data:
