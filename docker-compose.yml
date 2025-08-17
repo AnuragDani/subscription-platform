@@ -1,3 +1,4 @@
+# docker-compose.yml (Updated for Commit 4)
 services:
   postgres:
     image: postgres:15
@@ -9,95 +10,24 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      # Mount the migrations directory to the init scripts location
-      - ./migrations:/docker-entrypoint-initdb.d/:ro
+      - ./migrations:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U payment_user -d payment_db"]
       interval: 10s
       timeout: 5s
       retries: 5
-    
+
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
-    volumes:
-      - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
-      timeout: 5s
+      timeout: 3s
       retries: 5
-      
-  api-gateway:
-    build: 
-      context: .
-      dockerfile: cmd/api-gateway/Dockerfile
-    ports:
-      - "8080:8080"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      - DATABASE_URL=postgres://payment_user:payment_pass@postgres:5432/payment_db?sslmode=disable
-      - REDIS_URL=redis://redis:6379
-      - PAYMENT_ORCHESTRATOR_URL=http://payment-orchestrator:8001
-      - SUBSCRIPTION_SERVICE_URL=http://subscription-service:8002
-      - BPAS_SERVICE_URL=http://bpas-service:8003
-    
-  payment-orchestrator:
-    build:
-      context: .
-      dockerfile: cmd/payment-orchestrator/Dockerfile
-    ports:
-      - "8001:8001"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      - DATABASE_URL=postgres://payment_user:payment_pass@postgres:5432/payment_db?sslmode=disable
-      - REDIS_URL=redis://redis:6379
-      - PROCESSOR_A_URL=http://mock-processor-a:8101
-      - PROCESSOR_B_URL=http://mock-processor-b:8102
-      - NETWORK_TOKEN_URL=http://network-token-service:8103
-      - BPAS_SERVICE_URL=http://bpas-service:8003
-    
-  subscription-service:
-    build:
-      context: .
-      dockerfile: cmd/subscription-service/Dockerfile
-    ports:
-      - "8002:8002"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      - DATABASE_URL=postgres://payment_user:payment_pass@postgres:5432/payment_db?sslmode=disable
-      - REDIS_URL=redis://redis:6379
-      - PAYMENT_ORCHESTRATOR_URL=http://payment-orchestrator:8001
-      - NETWORK_TOKEN_URL=http://network-token-service:8103
-    
-  bpas-service:
-    build:
-      context: .
-      dockerfile: cmd/bpas-service/Dockerfile
-    ports:
-      - "8003:8003"
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      - DATABASE_URL=postgres://payment_user:payment_pass@postgres:5432/payment_db?sslmode=disable
-      - CONFIG_PATH=/app/configs/routing-rules.yaml
-    volumes:
-      - ./configs:/app/configs
-    
+
+  # Mock Payment Processor A (Primary)
   mock-processor-a:
     build:
       context: .
@@ -105,9 +35,15 @@ services:
     ports:
       - "8101:8101"
     environment:
-      - PROCESSOR_NAME=processor_a
-      - SUCCESS_RATE=80
-    
+      - LOG_LEVEL=info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8101/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # Mock Payment Processor B (Secondary/Multi-Currency)
   mock-processor-b:
     build:
       context: .
@@ -115,9 +51,116 @@ services:
     ports:
       - "8102:8102"
     environment:
-      - PROCESSOR_NAME=processor_b
-      - SUCCESS_RATE=90
-    
+      - LOG_LEVEL=info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8102/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # API Gateway (Updated to use processor clients)
+  api-gateway:
+    build:
+      context: .
+      dockerfile: cmd/api-gateway/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - DATABASE_URL=postgres://payment_user:payment_pass@postgres:5432/payment_db
+      - REDIS_URL=redis://redis:6379
+      - PROCESSOR_A_URL=http://mock-processor-a:8101
+      - PROCESSOR_B_URL=http://mock-processor-b:8102
+      - LOG_LEVEL=info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mock-processor-a:
+        condition: service_healthy
+      mock-processor-b:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  payment-orchestrator:
+    build:
+      context: .
+      dockerfile: cmd/payment-orchestrator/Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      - DATABASE_URL=postgres://payment_user:payment_pass@postgres:5432/payment_db
+      - REDIS_URL=redis://redis:6379
+      - PROCESSOR_A_URL=http://mock-processor-a:8101
+      - PROCESSOR_B_URL=http://mock-processor-b:8102
+      - LOG_LEVEL=info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mock-processor-a:
+        condition: service_healthy
+      mock-processor-b:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  subscription-service:
+    build:
+      context: .
+      dockerfile: cmd/subscription-service/Dockerfile
+    ports:
+      - "8002:8002"
+    environment:
+      - DATABASE_URL=postgres://payment_user:payment_pass@postgres:5432/payment_db
+      - REDIS_URL=redis://redis:6379
+      - PAYMENT_ORCHESTRATOR_URL=http://payment-orchestrator:8001
+      - LOG_LEVEL=info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      payment-orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  bpas-service:
+    build:
+      context: .
+      dockerfile: cmd/bpas-service/Dockerfile
+    ports:
+      - "8003:8003"
+    environment:
+      - DATABASE_URL=postgres://payment_user:payment_pass@postgres:5432/payment_db
+      - REDIS_URL=redis://redis:6379
+      - LOG_LEVEL=info
+    volumes:
+      - ./configs:/app/configs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   network-token-service:
     build:
       context: .
@@ -125,23 +168,40 @@ services:
     ports:
       - "8103:8103"
     environment:
-      - NETWORK_TOKEN_SUCCESS_RATE=95
-    
+      - LOG_LEVEL=info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8103/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   mit-scheduler:
     build:
       context: .
       dockerfile: cmd/mit-scheduler/Dockerfile
     ports:
       - "8004:8004"
+    environment:
+      - DATABASE_URL=postgres://payment_user:payment_pass@postgres:5432/payment_db
+      - REDIS_URL=redis://redis:6379
+      - PAYMENT_ORCHESTRATOR_URL=http://payment-orchestrator:8001
+      - LOG_LEVEL=info
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       payment-orchestrator:
-        condition: service_started
-    environment:
-      - DATABASE_URL=postgres://payment_user:payment_pass@postgres:5432/payment_db?sslmode=disable
-      - PAYMENT_ORCHESTRATOR_URL=http://payment-orchestrator:8001
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
 volumes:
   postgres_data:
-  redis_data:
+
+networks:
+  default:
+    name: payment-orchestrator
