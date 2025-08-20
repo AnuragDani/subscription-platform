@@ -1,4 +1,4 @@
-# docker-compose.yml (Updated for Commit 4)
+# docker-compose.yml (Updated for Commit 5)
 services:
   postgres:
     image: postgres:15
@@ -26,6 +26,23 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+
+  # Network Token Service (NEW in Commit 5)
+  network-token-service:
+    build:
+      context: .
+      dockerfile: cmd/network-token-service/Dockerfile
+    ports:
+      - "8103:8103"
+    environment:
+      - LOG_LEVEL=info
+      - NETWORK_TOKEN_SUCCESS_RATE=95
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8103/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
 
   # Mock Payment Processor A (Primary)
   mock-processor-a:
@@ -59,7 +76,7 @@ services:
       retries: 3
     restart: unless-stopped
 
-  # API Gateway (Updated to use processor clients)
+  # API Gateway
   api-gateway:
     build:
       context: .
@@ -71,6 +88,7 @@ services:
       - REDIS_URL=redis://redis:6379
       - PROCESSOR_A_URL=http://mock-processor-a:8101
       - PROCESSOR_B_URL=http://mock-processor-b:8102
+      - NETWORK_TOKEN_URL=http://network-token-service:8103
       - LOG_LEVEL=info
     depends_on:
       postgres:
@@ -80,6 +98,8 @@ services:
       mock-processor-a:
         condition: service_healthy
       mock-processor-b:
+        condition: service_healthy
+      network-token-service:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
@@ -98,6 +118,7 @@ services:
       - REDIS_URL=redis://redis:6379
       - PROCESSOR_A_URL=http://mock-processor-a:8101
       - PROCESSOR_B_URL=http://mock-processor-b:8102
+      - NETWORK_TOKEN_URL=http://network-token-service:8103
       - LOG_LEVEL=info
     depends_on:
       postgres:
@@ -107,6 +128,8 @@ services:
       mock-processor-a:
         condition: service_healthy
       mock-processor-b:
+        condition: service_healthy
+      network-token-service:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
@@ -124,6 +147,7 @@ services:
       - DATABASE_URL=postgres://payment_user:payment_pass@postgres:5432/payment_db
       - REDIS_URL=redis://redis:6379
       - PAYMENT_ORCHESTRATOR_URL=http://payment-orchestrator:8001
+      - NETWORK_TOKEN_URL=http://network-token-service:8103
       - LOG_LEVEL=info
     depends_on:
       postgres:
@@ -131,6 +155,8 @@ services:
       redis:
         condition: service_healthy
       payment-orchestrator:
+        condition: service_healthy
+      network-token-service:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
@@ -161,20 +187,6 @@ services:
       timeout: 10s
       retries: 3
 
-  network-token-service:
-    build:
-      context: .
-      dockerfile: cmd/network-token-service/Dockerfile
-    ports:
-      - "8103:8103"
-    environment:
-      - LOG_LEVEL=info
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8103/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
   mit-scheduler:
     build:
       context: .
@@ -185,6 +197,7 @@ services:
       - DATABASE_URL=postgres://payment_user:payment_pass@postgres:5432/payment_db
       - REDIS_URL=redis://redis:6379
       - PAYMENT_ORCHESTRATOR_URL=http://payment-orchestrator:8001
+      - NETWORK_TOKEN_URL=http://network-token-service:8103
       - LOG_LEVEL=info
     depends_on:
       postgres:
@@ -192,6 +205,8 @@ services:
       redis:
         condition: service_healthy
       payment-orchestrator:
+        condition: service_healthy
+      network-token-service:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
