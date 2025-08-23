@@ -1,0 +1,213 @@
+package database
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"time"
+
+	"github.com/your-org/payment-orchestrator-prototype/internal/models"
+)
+
+// InsertTransaction creates a new transaction record
+func (db *DB) InsertTransaction(ctx context.Context, tx *models.Transaction) error {
+	query := `
+		INSERT INTO transactions (
+			id, subscription_id, payment_method_id, processor_used, amount, 
+			currency, status, idempotency_key, created_at
+		) VALUES (
+			gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8
+		) RETURNING id`
+
+	err := db.conn.QueryRowContext(ctx, query,
+		tx.SubscriptionID,
+		tx.PaymentMethodID,
+		tx.ProcessorUsed,
+		tx.Amount,
+		tx.Currency,
+		tx.Status,
+		tx.IdempotencyKey,
+		tx.CreatedAt,
+	).Scan(&tx.ID)
+
+	if err != nil {
+		return fmt.Errorf("failed to insert transaction: %w", err)
+	}
+
+	return nil
+}
+
+// UpdateTransaction updates an existing transaction
+func (db *DB) UpdateTransaction(ctx context.Context, tx *models.Transaction) error {
+	query := `
+		UPDATE transactions 
+		SET status = $1, processor_transaction_id = $2, error_code = $3, 
+		    error_message = $4, updated_at = $5
+		WHERE id = $6`
+
+	_, err := db.conn.ExecContext(ctx, query,
+		tx.Status,
+		tx.ProcessorTransactionID,
+		tx.ErrorCode,
+		tx.ErrorMessage,
+		time.Now(),
+		tx.ID,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to update transaction: %w", err)
+	}
+
+	return nil
+}
+
+// GetTransaction retrieves a transaction by ID
+func (db *DB) GetTransaction(ctx context.Context, transactionID string) (*models.Transaction, error) {
+	query := `
+		SELECT id, subscription_id, payment_method_id, processor_used, amount,
+		       currency, status, idempotency_key, processor_transaction_id,
+		       error_code, error_message, created_at
+		FROM transactions 
+		WHERE id = $1`
+
+	tx := &models.Transaction{}
+	var processorTxID, errorCode, errorMessage sql.NullString
+
+	err := db.conn.QueryRowContext(ctx, query, transactionID).Scan(
+		&tx.ID,
+		&tx.SubscriptionID,
+		&tx.PaymentMethodID,
+		&tx.ProcessorUsed,
+		&tx.Amount,
+		&tx.Currency,
+		&tx.Status,
+		&tx.IdempotencyKey,
+		&processorTxID,
+		&errorCode,
+		&errorMessage,
+		&tx.CreatedAt,
+	)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("transaction not found: %s", transactionID)
+		}
+		return nil, fmt.Errorf("failed to get transaction: %w", err)
+	}
+
+	// Handle nullable fields
+	if processorTxID.Valid {
+		tx.ProcessorTransactionID = processorTxID.String
+	}
+	if errorCode.Valid {
+		tx.ErrorCode = errorCode.String
+	}
+	if errorMessage.Valid {
+		tx.ErrorMessage = errorMessage.String
+	}
+
+	return tx, nil
+}
+
+// GetPaymentMethod retrieves a payment method by ID
+func (db *DB) GetPaymentMethod(ctx context.Context, paymentMethodID string) (*models.PaymentMethod, error) {
+	query := `
+		SELECT id, user_id, network_token, processor_a_token, processor_b_token,
+		       token_type, last_four, exp_month, exp_year, is_default, created_at
+		FROM payment_methods 
+		WHERE id = $1`
+
+	pm := &models.PaymentMethod{}
+	var networkToken, processorAToken, processorBToken sql.NullString
+	var expMonth, expYear sql.NullInt32
+
+	err := db.conn.QueryRowContext(ctx, query, paymentMethodID).Scan(
+		&pm.ID,
+		&pm.UserID,
+		&networkToken,
+		&processorAToken,
+		&processorBToken,
+		&pm.TokenType,
+		&pm.LastFour,
+		&expMonth,
+		&expYear,
+		&pm.IsDefault,
+		&pm.CreatedAt,
+	)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("payment method not found: %s", paymentMethodID)
+		}
+		return nil, fmt.Errorf("failed to get payment method: %w", err)
+	}
+
+	// Handle nullable fields
+	if networkToken.Valid {
+		pm.NetworkToken = networkToken.String
+	}
+	if processorAToken.Valid {
+		pm.ProcessorAToken = processorAToken.String
+	}
+	if processorBToken.Valid {
+		pm.ProcessorBToken = processorBToken.String
+	}
+	if expMonth.Valid {
+		pm.ExpMonth = int(expMonth.Int32)
+	}
+	if expYear.Valid {
+		pm.ExpYear = int(expYear.Int32)
+	}
+
+	return pm, nil
+}
+
+// GetTransactionsByIdempotencyKey checks for existing transaction with same idempotency key
+func (db *DB) GetTransactionByIdempotencyKey(ctx context.Context, key string) (*models.Transaction, error) {
+	query := `
+		SELECT id, subscription_id, payment_method_id, processor_used, amount,
+		       currency, status, idempotency_key, processor_transaction_id,
+		       error_code, error_message, created_at
+		FROM transactions 
+		WHERE idempotency_key = $1
+		ORDER BY created_at DESC
+		LIMIT 1`
+
+	tx := &models.Transaction{}
+	var processorTxID, errorCode, errorMessage sql.NullString
+
+	err := db.conn.QueryRowContext(ctx, query, key).Scan(
+		&tx.ID,
+		&tx.SubscriptionID,
+		&tx.PaymentMethodID,
+		&tx.ProcessorUsed,
+		&tx.Amount,
+		&tx.Currency,
+		&tx.Status,
+		&tx.IdempotencyKey,
+		&processorTxID,
+		&errorCode,
+		&errorMessage,
+		&tx.CreatedAt,
+	)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil // No existing transaction found
+		}
+		return nil, fmt.Errorf("failed to get transaction by idempotency key: %w", err)
+	}
+
+	// Handle nullable fields
+	if processorTxID.Valid {
+		tx.ProcessorTransactionID = processorTxID.String
+	}
+	if errorCode.Valid {
+		tx.ErrorCode = errorCode.String
+	}
+	if errorMessage.Valid {
+		tx.ErrorMessage = errorMessage.String
+	}
+
+	return tx, nil
+}

@@ -1,6 +1,6 @@
-# docker-compose.yml - Add these environment variables to payment-orchestrator service
+# docker-compose.yml - 
 
-payment-orchestrator:
+  payment-orchestrator:
     build:
       context: .
       dockerfile: ./cmd/payment-orchestrator/Dockerfile
