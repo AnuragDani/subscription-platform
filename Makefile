@@ -137,3 +137,57 @@ health:
 	@curl -s http://localhost:8102/health > /dev/null && echo "  Processor B: ✅ Healthy" || echo "  Processor B: ❌ Unhealthy"
 	@curl -s http://localhost:8103/health > /dev/null && echo "  Network Tokens: ✅ Healthy" || echo "  Network Tokens: ❌ Unhealthy"
 	@curl -s http://localhost:8003/health > /dev/null && echo "  BPAS: ✅ Healthy" || echo "  BPAS: ❌ Unhealthy"
+
+
+# Payment Orchestrator specific targets
+.PHONY: test-orchestrator build-orchestrator logs-orchestrator
+
+# Test the Payment Orchestrator integration
+test-orchestrator:
+	@echo "Testing Payment Orchestrator integration..."
+	@chmod +x scripts/test-orchestrator.sh
+	@scripts/test-orchestrator.sh
+
+# Build and restart just the payment orchestrator
+build-orchestrator:
+	@echo "Building Payment Orchestrator..."
+	@docker-compose build payment-orchestrator
+	@docker-compose up payment-orchestrator -d
+
+# View Payment Orchestrator logs
+logs-orchestrator:
+	@docker-compose logs -f payment-orchestrator
+
+# Test the complete payment flow (orchestrator + dependencies)
+test-payment-flow:
+	@echo "Testing complete payment processing flow..."
+	@docker-compose up mock-processor-a mock-processor-b bpas-service network-token-service payment-orchestrator -d
+	@sleep 10
+	@chmod +x scripts/test-orchestrator.sh
+	@scripts/test-orchestrator.sh
+
+# Quick integration test (all core services)
+test-integration:
+	@echo "Running integration tests..."
+	@docker-compose up postgres redis mock-processor-a mock-processor-b bpas-service network-token-service payment-orchestrator -d
+	@sleep 15
+	@make test-processors
+	@make test-bpas  
+	@make test-orchestrator
+
+# Database inspection for payment testing
+inspect-transactions:
+	@echo "Inspecting recent transactions..."
+	@docker exec -it $$(docker ps -q -f name=postgres) psql -U payment_user -d payment_db -c "SELECT id, amount, currency, status, processor_used, created_at FROM transactions ORDER BY created_at DESC LIMIT 10;"
+
+# Cache inspection for idempotency testing  
+inspect-cache:
+	@echo "Inspecting idempotency cache..."
+	@docker exec -it $$(docker ps -q -f name=redis) redis-cli KEYS "idempotency:*" | head -10
+
+# Reset test data
+reset-test-data:
+	@echo "Resetting test data..."
+	@docker exec -it $$(docker ps -q -f name=postgres) psql -U payment_user -d payment_db -c "DELETE FROM transactions WHERE subscription_id LIKE 'sub_test_%' OR subscription_id LIKE 'sub_failover_%' OR subscription_id LIKE 'sub_eur_%' OR subscription_id LIKE 'sub_highvalue_%' OR subscription_id LIKE 'sub_invalid_%' OR subscription_id LIKE 'sub_load_%';"
+	@docker exec -it $$(docker ps -q -f name=redis) redis-cli FLUSHALL
+	@echo "Test data reset complete"

@@ -1,47 +1,72 @@
+// internal/database/connection.go
 package database
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"time"
 
 	_ "github.com/lib/pq"
 )
 
+// DB wraps the database connection
 type DB struct {
-	*sql.DB
+	Conn *sql.DB
 }
 
-func NewConnection(databaseURL string) (*DB, error) {
-	db, err := sql.Open("postgres", databaseURL)
+// Connect establishes a connection to PostgreSQL database
+func Connect(databaseURL string) (*DB, error) {
+	conn, err := sql.Open("postgres", databaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
+		return nil, fmt.Errorf("failed to open database connection: %w", err)
 	}
 
 	// Configure connection pool
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(5)
-	db.SetConnMaxLifetime(5 * time.Minute)
+	conn.SetMaxOpenConns(25)
+	conn.SetMaxIdleConns(5)
+	conn.SetConnMaxLifetime(5 * time.Minute)
 
-	// Test connection
-	if err := db.Ping(); err != nil {
+	// Test the connection
+	if err := conn.Ping(); err != nil {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	log.Println("✅ Database connection established")
-	return &DB{db}, nil
+	return &DB{Conn: conn}, nil
 }
 
+// Close closes the database connection
 func (db *DB) Close() error {
-	log.Println("🔌 Closing database connection")
-	return db.DB.Close()
+	if db.Conn != nil {
+		return db.Conn.Close()
+	}
+	return nil
 }
 
-func (db *DB) HealthCheck() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+// Ping tests the database connection
+func (db *DB) Ping() error {
+	if db.Conn == nil {
+		return fmt.Errorf("database connection is nil")
+	}
+	return db.Conn.Ping()
+}
 
-	return db.PingContext(ctx)
+// Health returns the health status of the database connection
+func (db *DB) Health() map[string]interface{} {
+	stats := db.Conn.Stats()
+
+	health := map[string]interface{}{
+		"status":           "healthy",
+		"open_connections": stats.OpenConnections,
+		"in_use":           stats.InUse,
+		"idle":             stats.Idle,
+		"max_open_conns":   stats.MaxOpenConnections,
+	}
+
+	// Check if connection is working
+	if err := db.Ping(); err != nil {
+		health["status"] = "unhealthy"
+		health["error"] = err.Error()
+	}
+
+	return health
 }

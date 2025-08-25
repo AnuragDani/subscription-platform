@@ -1,33 +1,35 @@
-# docker-compose.yml - Add these environment variables to payment-orchestrator service
+# cmd/payment-orchestrator/Dockerfile
+FROM golang:1.21-alpine AS builder
 
-payment-orchestrator:
-    build:
-      context: .
-      dockerfile: ./cmd/payment-orchestrator/Dockerfile
-    ports:
-      - "8001:8001"
-    environment:
-      - DATABASE_URL=postgres://payment_user:payment_pass@postgres:5432/payment_db?sslmode=disable
-      - REDIS_URL=redis://redis:6379
-      - PROCESSOR_A_URL=http://mock-processor-a:8101
-      - PROCESSOR_B_URL=http://mock-processor-b:8102
-      - NETWORK_TOKEN_URL=http://network-token-service:8103
-      - BPAS_SERVICE_URL=http://bpas-service:8003
-      - LOG_LEVEL=info
-      - PORT=8001
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      mock-processor-a:
-        condition: service_started
-      mock-processor-b:
-        condition: service_started
-      bpas-service:
-        condition: service_started
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+WORKDIR /app
+
+# Copy go mod files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the application
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o payment-orchestrator ./cmd/payment-orchestrator
+
+# Final stage
+FROM alpine:latest
+
+# Install ca-certificates and curl for health checks
+RUN apk --no-cache add ca-certificates curl
+
+WORKDIR /root/
+
+# Copy binary from builder stage
+COPY --from=builder /app/payment-orchestrator .
+
+# Expose port
+EXPOSE 8001
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8001/health || exit 1
+
+# Run the binary
+CMD ["./payment-orchestrator"]

@@ -110,32 +110,38 @@ services:
   payment-orchestrator:
     build:
       context: .
-      dockerfile: cmd/payment-orchestrator/Dockerfile
+      dockerfile: ./cmd/payment-orchestrator/Dockerfile
+    container_name: subscription-payment-orchestrator-1
     ports:
       - "8001:8001"
     environment:
-      - DATABASE_URL=postgres://payment_user:payment_pass@postgres:5432/payment_db
+      - DATABASE_URL=postgres://payment_user:payment_pass@postgres:5432/payment_db?sslmode=disable
       - REDIS_URL=redis://redis:6379
       - PROCESSOR_A_URL=http://mock-processor-a:8101
       - PROCESSOR_B_URL=http://mock-processor-b:8102
       - NETWORK_TOKEN_URL=http://network-token-service:8103
+      - BPAS_SERVICE_URL=http://bpas-service:8003
       - LOG_LEVEL=info
+      - PORT=8001
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      mock-processor-a:
-        condition: service_healthy
-      mock-processor-b:
-        condition: service_healthy
-      network-token-service:
-        condition: service_healthy
+      - postgres
+      - redis
+      - mock-processor-a
+      - mock-processor-b
+      - bpas-service
+      # Remove health check conditions temporarily
+    #networks:
+    #  - payment-orchestrator
+    volumes:
+      # Optional: for development - mount source code
+      - ./configs:/app/configs:ro
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 10s
 
   subscription-service:
     build:
@@ -220,3 +226,4 @@ volumes:
 networks:
   default:
     name: payment-orchestrator
+    driver: bridge
