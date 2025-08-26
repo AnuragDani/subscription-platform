@@ -1,490 +1,141 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
-	"math/rand"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/AnuragDani/subscription-platform/internal/cache"
-	"github.com/AnuragDani/subscription-platform/internal/config"
-	"github.com/AnuragDani/subscription-platform/internal/database"
-	"github.com/AnuragDani/subscription-platform/internal/logger"
-	"github.com/AnuragDani/subscription-platform/internal/models"
 )
 
 type PaymentOrchestrator struct {
-	db     *database.DB
-	cache  *cache.Client
-	logger *logger.Logger
-	config *config.Config
+	db           *DB
+	cache        *RedisClient
+	processorA   *ProcessorClient
+	processorB   *ProcessorClient
+	bpasClient   *BPASClient
+	tokenManager *TokenManager
 }
 
-type PaymentRequest struct {
-	SubscriptionID  string  `json:"subscription_id"`
-	PaymentMethodID string  `json:"payment_method_id"`
-	Amount          float64 `json:"amount"`
-	Currency        string  `json:"currency"`
-	IdempotencyKey  string  `json:"idempotency_key,omitempty"`
-	BusinessProfile string  `json:"business_profile,omitempty"`
-}
+func main() {
+	log.Println("🚀 Payment Orchestrator starting on port 8001")
 
-type PaymentResponse struct {
-	Success        bool   `json:"success"`
-	TransactionID  string `json:"transaction_id,omitempty"`
-	ProcessorUsed  string `json:"processor_used,omitempty"`
-	ErrorMessage   string `json:"error_message,omitempty"`
-	ErrorCode      string `json:"error_code,omitempty"`
-	IdempotencyKey string `json:"idempotency_key"`
-}
+	// Initialize configuration
+	cfg := LoadConfig()
 
-type RefundRequest struct {
-	TransactionID  string  `json:"transaction_id"`
-	Amount         float64 `json:"amount"`
-	Reason         string  `json:"reason"`
-	IdempotencyKey string  `json:"idempotency_key,omitempty"`
-}
-
-type RefundResponse struct {
-	Success       bool   `json:"success"`
-	RefundID      string `json:"refund_id,omitempty"`
-	ProcessorUsed string `json:"processor_used,omitempty"`
-	ErrorMessage  string `json:"error_message,omitempty"`
-	ErrorCode     string `json:"error_code,omitempty"`
-}
-
-type ProcessorClient struct {
-	BaseURL string
-	Timeout time.Duration
-}
-
-type ProcessorResponse struct {
-	Success       bool   `json:"success"`
-	TransactionID string `json:"transaction_id,omitempty"`
-	AuthCode      string `json:"auth_code,omitempty"`
-	ErrorCode     string `json:"error_code,omitempty"`
-	ErrorMessage  string `json:"error_message,omitempty"`
-}
-
-func NewPaymentOrchestrator(cfg *config.Config) (*PaymentOrchestrator, error) {
-	db, err := database.Connect(cfg.DatabaseURL)
+	// Connect to database
+	db, err := NewDB(cfg.DatabaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to database: %w", err)
+		log.Fatal("Failed to connect to database:", err)
 	}
+	defer db.Close()
 
-	cache, err := cache.NewRedisClient(cfg.RedisURL)
+	// Connect to Redis
+	cache, err := NewRedisClient(cfg.RedisURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to Redis: %w", err)
+		log.Fatal("Failed to connect to Redis:", err)
+	}
+	defer cache.Close()
+
+	// Initialize processor clients
+	processorA := NewProcessorClient("processor_a", cfg.ProcessorAURL)
+	processorB := NewProcessorClient("processor_b", cfg.ProcessorBURL)
+
+	// Initialize BPAS client
+	bpasClient := NewBPASClient(cfg.BPASServiceURL)
+
+	// Initialize token manager
+	tokenManager := NewTokenManager(cfg.NetworkTokenURL, processorA, processorB)
+
+	// Create orchestrator
+	orchestrator := &PaymentOrchestrator{
+		db:           db,
+		cache:        cache,
+		processorA:   processorA,
+		processorB:   processorB,
+		bpasClient:   bpasClient,
+		tokenManager: tokenManager,
 	}
 
-	logger := logger.New("payment-orchestrator")
+	// Setup routes
+	r := mux.NewRouter()
+	r.HandleFunc("/health", orchestrator.healthCheck).Methods("GET")
+	r.HandleFunc("/orchestrator/charge", orchestrator.processCharge).Methods("POST")
+	r.HandleFunc("/orchestrator/refund", orchestrator.processRefund).Methods("POST")
+	r.HandleFunc("/admin/stats", orchestrator.getStats).Methods("GET")
 
-	return &PaymentOrchestrator{
-		db:     db,
-		cache:  cache,
-		logger: logger,
-		config: cfg,
-	}, nil
-}
-
-func (po *PaymentOrchestrator) processPayment(w http.ResponseWriter, r *http.Request) {
-	var req PaymentRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
+	// Start server with graceful shutdown
+	srv := &http.Server{
+		Addr:         ":8001",
+		Handler:      r,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
 	}
 
-	// Generate idempotency key if not provided
-	if req.IdempotencyKey == "" {
-		req.IdempotencyKey = generateIdempotencyKey()
-	}
-
-	// Check for duplicate request
-	ctx := r.Context()
-	if cachedResponse := po.checkIdempotency(ctx, req.IdempotencyKey); cachedResponse != nil {
-		po.logger.Info("Returning cached response for idempotency key", "key", req.IdempotencyKey)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(cachedResponse)
-		return
-	}
-
-	// Process payment with orchestration logic
-	response := po.orchestratePayment(ctx, &req)
-
-	// Cache the response
-	po.cacheResponse(ctx, req.IdempotencyKey, response)
-
-	// Return response
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
-}
-
-func (po *PaymentOrchestrator) orchestratePayment(ctx context.Context, req *PaymentRequest) *PaymentResponse {
-	po.logger.Info("Starting payment orchestration", "subscription_id", req.SubscriptionID, "amount", req.Amount)
-
-	// Step 1: Get payment method and tokens
-	paymentMethod, err := po.getPaymentMethod(ctx, req.PaymentMethodID)
-	if err != nil {
-		return &PaymentResponse{
-			Success:        false,
-			ErrorCode:      "PAYMENT_METHOD_NOT_FOUND",
-			ErrorMessage:   "Payment method not found",
-			IdempotencyKey: req.IdempotencyKey,
+	go func() {
+		log.Printf("Payment Orchestrator listening on port 8001")
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal("Failed to start server:", err)
 		}
+	}()
+
+	// Wait for interrupt signal
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	log.Println("Shutting down server...")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Fatal("Server forced to shutdown:", err)
 	}
 
-	// Step 2: Get routing decision from BPAS
-	processor := po.getRoutingDecision(ctx, req)
-
-	// Step 3: Attempt payment with primary processor
-	response := po.attemptPayment(ctx, req, paymentMethod, processor)
-	if response.Success {
-		po.logger.Info("Payment successful", "processor", processor, "transaction_id", response.TransactionID)
-		return response
-	}
-
-	// Step 4: Failover logic - try secondary processor
-	secondaryProcessor := po.getSecondaryProcessor(processor)
-	if secondaryProcessor != "" {
-		po.logger.Info("Primary processor failed, attempting failover", "primary", processor, "secondary", secondaryProcessor)
-
-		failoverResponse := po.attemptPayment(ctx, req, paymentMethod, secondaryProcessor)
-		if failoverResponse.Success {
-			po.logger.Info("Failover payment successful", "processor", secondaryProcessor, "transaction_id", failoverResponse.TransactionID)
-			return failoverResponse
-		}
-	}
-
-	// Step 5: All processors failed
-	po.logger.Error("All processors failed", "subscription_id", req.SubscriptionID, "error", response.ErrorMessage)
-	return &PaymentResponse{
-		Success:        false,
-		ErrorCode:      "ALL_PROCESSORS_FAILED",
-		ErrorMessage:   po.getUserFriendlyError(response.ErrorCode),
-		IdempotencyKey: req.IdempotencyKey,
-	}
+	log.Println("Server exiting")
 }
 
-func (po *PaymentOrchestrator) attemptPayment(ctx context.Context, req *PaymentRequest, pm *models.PaymentMethod, processor string) *PaymentResponse {
-	// Create transaction record
-	transaction := &models.Transaction{
-		SubscriptionID:  req.SubscriptionID,
-		PaymentMethodID: req.PaymentMethodID,
-		ProcessorUsed:   processor,
-		Amount:          req.Amount,
-		Currency:        req.Currency,
-		Status:          "pending",
-		IdempotencyKey:  req.IdempotencyKey,
-		CreatedAt:       time.Now(),
-	}
-
-	// Insert transaction
-	if err := po.db.InsertTransaction(ctx, transaction); err != nil {
-		po.logger.Error("Failed to insert transaction", "error", err)
-		return &PaymentResponse{
-			Success:        false,
-			ErrorCode:      "DATABASE_ERROR",
-			ErrorMessage:   "Internal error",
-			IdempotencyKey: req.IdempotencyKey,
-		}
-	}
-
-	// Get appropriate token for processor
-	token := po.getTokenForProcessor(pm, processor)
-	if token == "" {
-		transaction.Status = "failed"
-		transaction.ErrorCode = "NO_TOKEN"
-		transaction.ErrorMessage = "No compatible token available"
-		po.db.UpdateTransaction(ctx, transaction)
-
-		return &PaymentResponse{
-			Success:        false,
-			ErrorCode:      "NO_TOKEN",
-			ErrorMessage:   "Payment method not compatible with processor",
-			IdempotencyKey: req.IdempotencyKey,
-		}
-	}
-
-	// Call processor
-	processorResponse, err := po.callProcessor(ctx, processor, &ProcessorChargeRequest{
-		Amount:         req.Amount,
-		Currency:       req.Currency,
-		Token:          token,
-		IdempotencyKey: req.IdempotencyKey,
-	})
-
-	// Update transaction with result
-	if err != nil {
-		transaction.Status = "failed"
-		transaction.ErrorCode = "PROCESSOR_ERROR"
-		transaction.ErrorMessage = err.Error()
-	} else if processorResponse.Success {
-		transaction.Status = "success"
-		transaction.ProcessorTransactionID = processorResponse.TransactionID
-	} else {
-		transaction.Status = "failed"
-		transaction.ErrorCode = processorResponse.ErrorCode
-		transaction.ErrorMessage = processorResponse.ErrorMessage
-	}
-
-	po.db.UpdateTransaction(ctx, transaction)
-
-	return &PaymentResponse{
-		Success:        processorResponse != nil && processorResponse.Success,
-		TransactionID:  transaction.ID,
-		ProcessorUsed:  processor,
-		ErrorCode:      transaction.ErrorCode,
-		ErrorMessage:   transaction.ErrorMessage,
-		IdempotencyKey: req.IdempotencyKey,
-	}
-}
-
-func (po *PaymentOrchestrator) getRoutingDecision(ctx context.Context, req *PaymentRequest) string {
-	// Call BPAS service for routing decision
-	bpasURL := fmt.Sprintf("%s/bpas/evaluate", po.config.BPASServiceURL)
-
-	bpasRequest := map[string]interface{}{
-		"amount":           req.Amount,
-		"currency":         req.Currency,
-		"business_profile": req.BusinessProfile,
-	}
-
-	requestBody, _ := json.Marshal(bpasRequest)
-	resp, err := http.Post(bpasURL, "application/json", bytes.NewBuffer(requestBody))
-	if err != nil {
-		po.logger.Error("Failed to call BPAS", "error", err)
-		return "processor_a" // Default fallback
-	}
-	defer resp.Body.Close()
-
-	var bpasResponse struct {
-		Processor string `json:"processor"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&bpasResponse); err != nil {
-		po.logger.Error("Failed to decode BPAS response", "error", err)
-		return "processor_a" // Default fallback
-	}
-
-	return bpasResponse.Processor
-}
-
-func (po *PaymentOrchestrator) getTokenForProcessor(pm *models.PaymentMethod, processor string) string {
-	// Prefer network token (portable across processors)
-	if pm.NetworkToken != "" {
-		return pm.NetworkToken
-	}
-
-	// Fall back to processor-specific tokens
-	switch processor {
-	case "processor_a":
-		return pm.ProcessorAToken
-	case "processor_b":
-		return pm.ProcessorBToken
-	default:
-		return ""
-	}
-}
-
-func (po *PaymentOrchestrator) getSecondaryProcessor(primary string) string {
-	switch primary {
-	case "processor_a":
-		return "processor_b"
-	case "processor_b":
-		return "processor_a"
-	default:
-		return ""
-	}
-}
-
-type ProcessorChargeRequest struct {
-	Amount         float64 `json:"amount"`
-	Currency       string  `json:"currency"`
-	Token          string  `json:"token"`
-	IdempotencyKey string  `json:"idempotency_key"`
-}
-
-func (po *PaymentOrchestrator) callProcessor(ctx context.Context, processor string, req *ProcessorChargeRequest) (*ProcessorResponse, error) {
-	var processorURL string
-	switch processor {
-	case "processor_a":
-		processorURL = po.config.ProcessorAURL
-	case "processor_b":
-		processorURL = po.config.ProcessorBURL
-	default:
-		return nil, fmt.Errorf("unknown processor: %s", processor)
-	}
-
-	requestBody, _ := json.Marshal(req)
-	url := fmt.Sprintf("%s/charge", processorURL)
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Post(url, "application/json", bytes.NewBuffer(requestBody))
-	if err != nil {
-		return nil, fmt.Errorf("processor call failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var processorResp ProcessorResponse
-	if err := json.NewDecoder(resp.Body).Decode(&processorResp); err != nil {
-		return nil, fmt.Errorf("failed to decode processor response: %w", err)
-	}
-
-	return &processorResp, nil
-}
-
-func (po *PaymentOrchestrator) processRefund(w http.ResponseWriter, r *http.Request) {
-	var req RefundRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	ctx := r.Context()
-
-	// Get original transaction
-	transaction, err := po.db.GetTransaction(ctx, req.TransactionID)
-	if err != nil {
-		http.Error(w, "Transaction not found", http.StatusNotFound)
-		return
-	}
-
-	// Refund must go to original processor
-	refundResponse := po.callProcessorRefund(ctx, transaction.ProcessorUsed, &ProcessorRefundRequest{
-		OriginalTransactionID: transaction.ProcessorTransactionID,
-		Amount:                req.Amount,
-		Reason:                req.Reason,
-	})
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(refundResponse)
-}
-
-type ProcessorRefundRequest struct {
-	OriginalTransactionID string  `json:"original_transaction_id"`
-	Amount                float64 `json:"amount"`
-	Reason                string  `json:"reason"`
-}
-
-func (po *PaymentOrchestrator) callProcessorRefund(ctx context.Context, processor string, req *ProcessorRefundRequest) *RefundResponse {
-	var processorURL string
-	switch processor {
-	case "processor_a":
-		processorURL = po.config.ProcessorAURL
-	case "processor_b":
-		processorURL = po.config.ProcessorBURL
-	default:
-		return &RefundResponse{
-			Success:      false,
-			ErrorCode:    "UNKNOWN_PROCESSOR",
-			ErrorMessage: "Unknown processor",
-		}
-	}
-
-	requestBody, _ := json.Marshal(req)
-	url := fmt.Sprintf("%s/refund", processorURL)
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Post(url, "application/json", bytes.NewBuffer(requestBody))
-	if err != nil {
-		return &RefundResponse{
-			Success:      false,
-			ErrorCode:    "PROCESSOR_ERROR",
-			ErrorMessage: "Failed to call processor",
-		}
-	}
-	defer resp.Body.Close()
-
-	var processorResp struct {
-		Success      bool   `json:"success"`
-		RefundID     string `json:"refund_id"`
-		ErrorCode    string `json:"error_code"`
-		ErrorMessage string `json:"error_message"`
-	}
-
-	json.NewDecoder(resp.Body).Decode(&processorResp)
-
-	return &RefundResponse{
-		Success:       processorResp.Success,
-		RefundID:      processorResp.RefundID,
-		ProcessorUsed: processor,
-		ErrorCode:     processorResp.ErrorCode,
-		ErrorMessage:  processorResp.ErrorMessage,
-	}
-}
-
-func (po *PaymentOrchestrator) healthCheck(w http.ResponseWriter, r *http.Request) {
+func (o *PaymentOrchestrator) healthCheck(w http.ResponseWriter, r *http.Request) {
 	health := map[string]interface{}{
 		"service":   "payment-orchestrator",
 		"status":    "healthy",
 		"timestamp": time.Now(),
 		"version":   "1.0.0",
+		"dependencies": map[string]string{
+			"database":    o.checkDatabaseHealth(),
+			"redis":       o.checkRedisHealth(),
+			"processor_a": o.checkProcessorHealth(o.processorA),
+			"processor_b": o.checkProcessorHealth(o.processorB),
+		},
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(health)
 }
 
-func (po *PaymentOrchestrator) checkIdempotency(ctx context.Context, key string) *PaymentResponse {
-	cacheKey := fmt.Sprintf("idempotency:%s", key)
-
-	var cachedResponse PaymentResponse
-	if err := po.cache.Get(ctx, cacheKey, &cachedResponse); err == nil {
-		return &cachedResponse
+func (o *PaymentOrchestrator) checkDatabaseHealth() string {
+	if err := o.db.Ping(); err != nil {
+		return "unhealthy"
 	}
-
-	return nil
+	return "healthy"
 }
 
-func (po *PaymentOrchestrator) cacheResponse(ctx context.Context, key string, response *PaymentResponse) {
-	cacheKey := fmt.Sprintf("idempotency:%s", key)
-	po.cache.Set(ctx, cacheKey, response, 24*time.Hour)
-}
-
-func (po *PaymentOrchestrator) getUserFriendlyError(errorCode string) string {
-	errorMap := map[string]string{
-		"CARD_DECLINED":         "Your card was declined. Please try a different payment method.",
-		"INSUFFICIENT_FUNDS":    "Payment declined due to insufficient funds.",
-		"CARD_EXPIRED":          "Your card has expired. Please update your payment method.",
-		"PROCESSOR_UNAVAILABLE": "Payment processing is temporarily unavailable. Please try again in a few minutes.",
-		"NETWORK_ERROR":         "A network error occurred. Please try again.",
-		"ALL_PROCESSORS_FAILED": "Payment processing is currently unavailable. Please try again later.",
+func (o *PaymentOrchestrator) checkRedisHealth() string {
+	ctx := context.Background()
+	if err := o.cache.Ping(ctx); err != nil {
+		return "unhealthy"
 	}
+	return "healthy"
+}
 
-	if msg, exists := errorMap[errorCode]; exists {
-		return msg
+func (o *PaymentOrchestrator) checkProcessorHealth(client *ProcessorClient) string {
+	if client.IsHealthy() {
+		return "healthy"
 	}
-	return "Payment could not be processed. Please try again."
-}
-
-func generateIdempotencyKey() string {
-	return fmt.Sprintf("idem_%d_%d", time.Now().UnixNano(), rand.Intn(10000))
-}
-
-func (po *PaymentOrchestrator) getPaymentMethod(ctx context.Context, paymentMethodID string) (*models.PaymentMethod, error) {
-	return po.db.GetPaymentMethod(ctx, paymentMethodID)
-}
-
-func main() {
-	cfg := config.Load()
-
-	orchestrator, err := NewPaymentOrchestrator(cfg)
-	if err != nil {
-		log.Fatal("Failed to initialize payment orchestrator:", err)
-	}
-
-	r := mux.NewRouter()
-
-	// Core endpoints
-	r.HandleFunc("/orchestrator/charge", orchestrator.processPayment).Methods("POST")
-	r.HandleFunc("/orchestrator/refund", orchestrator.processRefund).Methods("POST")
-	r.HandleFunc("/health", orchestrator.healthCheck).Methods("GET")
-
-	log.Println("🎼 Payment Orchestrator starting on port 8001")
-	log.Fatal(http.ListenAndServe(":8001", r))
+	return "unhealthy"
 }

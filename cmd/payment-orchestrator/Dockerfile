@@ -1,4 +1,3 @@
-# cmd/payment-orchestrator/Dockerfile
 FROM golang:1.21-alpine AS builder
 
 WORKDIR /app
@@ -16,20 +15,17 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o payment-orchestra
 # Final stage
 FROM alpine:latest
 
-# Install ca-certificates and curl for health checks
 RUN apk --no-cache add ca-certificates curl
 
 WORKDIR /root/
 
-# Copy binary from builder stage
+# Copy binary from builder
 COPY --from=builder /app/payment-orchestrator .
 
-# Expose port
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:8001/health || exit 1
+
 EXPOSE 8001
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8001/health || exit 1
-
-# Run the binary
 CMD ["./payment-orchestrator"]
