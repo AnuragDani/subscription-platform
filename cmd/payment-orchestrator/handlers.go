@@ -102,6 +102,9 @@ func (o *PaymentOrchestrator) processCharge(w http.ResponseWriter, r *http.Reque
 			result = &ChargeResponse{
 				Success:       false,
 				TransactionID: uuid.New().String(),
+				ProcessorUsed: "none", // Add this to track that no processor succeeded
+				Amount:        req.Amount,
+				Currency:      req.Currency,
 				ErrorCode:     "PROCESSORS_UNAVAILABLE",
 				UserMessage:   "Payment processing temporarily unavailable. Please try again in a few minutes.",
 			}
@@ -110,16 +113,17 @@ func (o *PaymentOrchestrator) processCharge(w http.ResponseWriter, r *http.Reque
 
 	// Store transaction
 	transaction := &Transaction{
-		ID:               result.TransactionID,
-		SubscriptionID:   req.SubscriptionID,
-		PaymentMethodID:  req.PaymentMethodID,
-		ProcessorUsed:    result.ProcessorUsed,
-		Amount:           req.Amount,
-		Currency:         req.Currency,
-		Status:           getStatus(result.Success),
-		IdempotencyKey:   req.IdempotencyKey,
-		ErrorCode:        result.ErrorCode,
-		UserErrorMessage: result.UserMessage,
+		ID:                     uuid.New().String(), // Generate our own UUID
+		SubscriptionID:         req.SubscriptionID,
+		PaymentMethodID:        req.PaymentMethodID,
+		ProcessorUsed:          result.ProcessorUsed,
+		Amount:                 req.Amount,
+		Currency:               req.Currency,
+		Status:                 getStatus(result.Success),
+		IdempotencyKey:         req.IdempotencyKey,
+		ProcessorTransactionID: result.TransactionID, // Store processor's ID here
+		ErrorCode:              result.ErrorCode,
+		UserErrorMessage:       result.UserMessage,
 	}
 
 	if err := o.db.CreateTransaction(ctx, transaction); err != nil {
