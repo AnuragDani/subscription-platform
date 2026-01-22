@@ -150,9 +150,9 @@ services:
     ports:
       - "8002:8002"
     environment:
-      - DATABASE_URL=postgres://payment_user:payment_pass@postgres:5432/payment_db
+      - DATABASE_URL=postgres://payment_user:payment_pass@postgres:5432/payment_db?sslmode=disable
       - REDIS_URL=redis://redis:6379
-      - PAYMENT_ORCHESTRATOR_URL=http://payment-orchestrator:8001
+      - ORCHESTRATOR_URL=http://payment-orchestrator:8001
       - NETWORK_TOKEN_URL=http://network-token-service:8103
       - LOG_LEVEL=info
     depends_on:
@@ -163,7 +163,7 @@ services:
       payment-orchestrator:
         condition: service_healthy
       network-token-service:
-        condition: service_healthy
+        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
       interval: 30s
@@ -200,10 +200,11 @@ services:
     ports:
       - "8004:8004"
     environment:
-      - DATABASE_URL=postgres://payment_user:payment_pass@postgres:5432/payment_db
+      - DATABASE_URL=postgres://payment_user:payment_pass@postgres:5432/payment_db?sslmode=disable
       - REDIS_URL=redis://redis:6379
       - PAYMENT_ORCHESTRATOR_URL=http://payment-orchestrator:8001
       - NETWORK_TOKEN_URL=http://network-token-service:8103
+      - SUBSCRIPTION_SERVICE_URL=http://subscription-service:8002
       - LOG_LEVEL=info
     depends_on:
       postgres:
@@ -213,7 +214,7 @@ services:
       payment-orchestrator:
         condition: service_healthy
       network-token-service:
-        condition: service_healthy
+        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
       interval: 30s
