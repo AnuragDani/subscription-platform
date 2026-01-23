@@ -30,6 +30,8 @@ type ChargeResponse struct {
 }
 
 func (o *PaymentOrchestrator) processCharge(w http.ResponseWriter, r *http.Request) {
+	startTime := time.Now()
+
 	var req ChargeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
@@ -39,6 +41,14 @@ func (o *PaymentOrchestrator) processCharge(w http.ResponseWriter, r *http.Reque
 	// Generate idempotency key if not provided
 	if req.IdempotencyKey == "" {
 		req.IdempotencyKey = uuid.New().String()
+	}
+
+	// Generate transaction ID early for event tracking
+	transactionID := uuid.New().String()
+
+	// Emit charge initiated event
+	if o.events != nil {
+		o.events.EmitChargeInitiated(transactionID, req.SubscriptionID, req.Amount, req.Currency)
 	}
 
 	// Check idempotency
@@ -89,9 +99,17 @@ func (o *PaymentOrchestrator) processCharge(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Try primary processor
+	failedOver := false
 	result, err := o.chargeWithProcessor(ctx, routingDecision.PrimaryProcessor, req, paymentMethod)
 	if err != nil {
 		log.Printf("Primary processor %s failed: %v", routingDecision.PrimaryProcessor, err)
+
+		// Emit failover event
+		if o.events != nil {
+			o.events.EmitFailoverTriggered(transactionID, req.Amount, req.Currency,
+				routingDecision.PrimaryProcessor, routingDecision.SecondaryProcessor)
+		}
+		failedOver = true
 
 		// Try secondary processor
 		result, err = o.chargeWithProcessor(ctx, routingDecision.SecondaryProcessor, req, paymentMethod)
@@ -101,8 +119,8 @@ func (o *PaymentOrchestrator) processCharge(w http.ResponseWriter, r *http.Reque
 			// Both processors failed
 			result = &ChargeResponse{
 				Success:       false,
-				TransactionID: uuid.New().String(),
-				ProcessorUsed: "none", // Add this to track that no processor succeeded
+				TransactionID: transactionID,
+				ProcessorUsed: "none",
 				Amount:        req.Amount,
 				Currency:      req.Currency,
 				ErrorCode:     "PROCESSORS_UNAVAILABLE",
@@ -111,9 +129,12 @@ func (o *PaymentOrchestrator) processCharge(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	// Use our transaction ID
+	result.TransactionID = transactionID
+
 	// Store transaction
 	transaction := &Transaction{
-		ID:                     uuid.New().String(), // Generate our own UUID
+		ID:                     transactionID,
 		SubscriptionID:         req.SubscriptionID,
 		PaymentMethodID:        req.PaymentMethodID,
 		ProcessorUsed:          result.ProcessorUsed,
@@ -121,7 +142,7 @@ func (o *PaymentOrchestrator) processCharge(w http.ResponseWriter, r *http.Reque
 		Currency:               req.Currency,
 		Status:                 getStatus(result.Success),
 		IdempotencyKey:         req.IdempotencyKey,
-		ProcessorTransactionID: result.TransactionID, // Store processor's ID here
+		ProcessorTransactionID: result.TransactionID,
 		ErrorCode:              result.ErrorCode,
 		UserErrorMessage:       result.UserMessage,
 	}
@@ -132,6 +153,23 @@ func (o *PaymentOrchestrator) processCharge(w http.ResponseWriter, r *http.Reque
 
 	// Cache result for idempotency
 	o.cacheIdempotencyResult(ctx, req.IdempotencyKey, result)
+
+	// Emit success or failure event
+	duration := time.Since(startTime)
+	if o.events != nil {
+		if result.Success {
+			o.events.EmitChargeSucceeded(transactionID, req.SubscriptionID, req.Amount, req.Currency,
+				result.ProcessorUsed, duration)
+		} else {
+			o.events.EmitChargeFailed(transactionID, req.SubscriptionID, req.Amount, req.Currency,
+				result.ProcessorUsed, result.ErrorCode, result.UserMessage)
+		}
+	}
+
+	// Log failover if it happened
+	if failedOver && result.Success {
+		log.Printf("Charge succeeded after failover to %s", result.ProcessorUsed)
+	}
 
 	// Return response
 	w.Header().Set("Content-Type", "application/json")

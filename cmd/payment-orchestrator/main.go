@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+
+	ws "github.com/AnuragDani/subscription-platform/internal/websocket"
 )
 
 type PaymentOrchestrator struct {
@@ -20,6 +22,8 @@ type PaymentOrchestrator struct {
 	processorB   *ProcessorClient
 	bpasClient   *BPASClient
 	tokenManager *TokenManager
+	wsHub        *ws.Hub
+	events       *EventEmitter
 }
 
 func main() {
@@ -52,6 +56,15 @@ func main() {
 	// Initialize token manager
 	tokenManager := NewTokenManager(cfg.NetworkTokenURL, processorA, processorB)
 
+	// Initialize WebSocket hub
+	logger := log.New(os.Stdout, "[WS-HUB] ", log.LstdFlags)
+	wsHub := ws.NewHub(logger)
+	go wsHub.Run()
+	log.Println("WebSocket hub started")
+
+	// Initialize event emitter
+	eventEmitter := NewEventEmitter(wsHub)
+
 	// Create orchestrator
 	orchestrator := &PaymentOrchestrator{
 		db:           db,
@@ -60,14 +73,19 @@ func main() {
 		processorB:   processorB,
 		bpasClient:   bpasClient,
 		tokenManager: tokenManager,
+		wsHub:        wsHub,
+		events:       eventEmitter,
 	}
 
 	// Setup routes
 	r := mux.NewRouter()
 	r.HandleFunc("/health", orchestrator.healthCheck).Methods("GET")
+	r.HandleFunc("/ws", wsHub.ServeWs).Methods("GET")
+	r.HandleFunc("/ws/stats", orchestrator.wsStats).Methods("GET")
 	r.HandleFunc("/orchestrator/charge", orchestrator.processCharge).Methods("POST")
 	r.HandleFunc("/orchestrator/refund", orchestrator.processRefund).Methods("POST")
 	r.HandleFunc("/admin/stats", orchestrator.getStats).Methods("GET")
+	r.HandleFunc("/internal/events", orchestrator.handleInternalEvent).Methods("POST")
 
 	// Start server with graceful shutdown
 	srv := &http.Server{
@@ -138,4 +156,36 @@ func (o *PaymentOrchestrator) checkProcessorHealth(client *ProcessorClient) stri
 		return "healthy"
 	}
 	return "unhealthy"
+}
+
+// wsStats returns WebSocket hub statistics
+func (o *PaymentOrchestrator) wsStats(w http.ResponseWriter, r *http.Request) {
+	stats := o.wsHub.GetStats()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats)
+}
+
+// InternalEventRequest represents an internal event from other services
+type InternalEventRequest struct {
+	Type  string      `json:"type"`
+	Event string      `json:"event"`
+	Data  interface{} `json:"data"`
+}
+
+// handleInternalEvent receives events from other services and broadcasts them
+func (o *PaymentOrchestrator) handleInternalEvent(w http.ResponseWriter, r *http.Request) {
+	var req InternalEventRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	// Broadcast the event to all WebSocket clients
+	o.wsHub.BroadcastEvent(req.Type, req.Event, req.Data)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":      true,
+		"client_count": o.wsHub.ClientCount(),
+	})
 }
