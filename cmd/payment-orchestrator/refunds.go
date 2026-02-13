@@ -58,8 +58,14 @@ func (o *PaymentOrchestrator) processRefund(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Process refund
+	originalProcessorTxID := transaction.ProcessorTransactionID
+	if originalProcessorTxID == "" {
+		http.Error(w, "Original processor transaction ID missing", http.StatusUnprocessableEntity)
+		return
+	}
+
 	refundReq := ProcessorRefundRequest{
-		OriginalTransactionID: req.TransactionID,
+		OriginalTransactionID: originalProcessorTxID,
 		Amount:                req.Amount,
 		Reason:                req.Reason,
 	}
@@ -81,6 +87,7 @@ func (o *PaymentOrchestrator) processRefund(w http.ResponseWriter, r *http.Reque
 		Currency:              transaction.Currency,
 		Status:                "refunded",
 		TransactionType:       "refund",
+		IdempotencyKey:        "refund_" + uuid.New().String(),
 		OriginalTransactionID: &req.TransactionID,
 	}
 

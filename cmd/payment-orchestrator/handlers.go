@@ -129,6 +129,8 @@ func (o *PaymentOrchestrator) processCharge(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	processorTransactionID := result.TransactionID
+
 	// Use our transaction ID
 	result.TransactionID = transactionID
 
@@ -142,7 +144,7 @@ func (o *PaymentOrchestrator) processCharge(w http.ResponseWriter, r *http.Reque
 		Currency:               req.Currency,
 		Status:                 getStatus(result.Success),
 		IdempotencyKey:         req.IdempotencyKey,
-		ProcessorTransactionID: result.TransactionID,
+		ProcessorTransactionID: processorTransactionID,
 		ErrorCode:              result.ErrorCode,
 		UserErrorMessage:       result.UserMessage,
 	}

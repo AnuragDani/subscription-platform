@@ -84,23 +84,25 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - DATABASE_URL=postgres://payment_user:payment_pass@postgres:5432/payment_db
-      - REDIS_URL=redis://redis:6379
-      - PROCESSOR_A_URL=http://mock-processor-a:8101
-      - PROCESSOR_B_URL=http://mock-processor-b:8102
-      - NETWORK_TOKEN_URL=http://network-token-service:8103
+      - SUBSCRIPTION_SERVICE_URL=http://subscription-service:8002
+      - PAYMENT_ORCHESTRATOR_URL=http://payment-orchestrator:8001
+      - BPAS_SERVICE_URL=http://bpas-service:8003
+      - MIT_SCHEDULER_URL=http://mit-scheduler:8004
+      - PORT=8080
       - LOG_LEVEL=info
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-      mock-processor-a:
-        condition: service_healthy
-      mock-processor-b:
-        condition: service_healthy
-      network-token-service:
-        condition: service_healthy
+      subscription-service:
+        condition: service_started
+      payment-orchestrator:
+        condition: service_started
+      bpas-service:
+        condition: service_started
+      mit-scheduler:
+        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
