@@ -2,6 +2,7 @@
 package logger
 
 import (
+	"fmt"
 	"log"
 	"os"
 )
@@ -67,8 +68,8 @@ func formatValue(v interface{}) string {
 	case string:
 		return val
 	case int, int64, float64:
-		return log.Sprint(val)
+		return fmt.Sprint(val)
 	default:
-		return log.Sprint(val)
+		return fmt.Sprint(val)
 	}
 }

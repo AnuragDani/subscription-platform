@@ -1,0 +1,18 @@
+claude.md
+CLAUDE.md.backup
+
+# Compiled binaries
+bpas-service
+mit-scheduler
+payment-orchestrator
+subscription-service
+mock-processor-a
+mock-processor-b
+network-token-service
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store

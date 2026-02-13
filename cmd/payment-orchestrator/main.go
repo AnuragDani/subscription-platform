@@ -85,6 +85,8 @@ func main() {
 	r.HandleFunc("/orchestrator/charge", orchestrator.processCharge).Methods("POST")
 	r.HandleFunc("/orchestrator/refund", orchestrator.processRefund).Methods("POST")
 	r.HandleFunc("/admin/stats", orchestrator.getStats).Methods("GET")
+	r.HandleFunc("/stats/transactions", orchestrator.getTransactionStats).Methods("GET")
+	r.HandleFunc("/stats/processors", orchestrator.getProcessorStats).Methods("GET")
 	r.HandleFunc("/internal/events", orchestrator.handleInternalEvent).Methods("POST")
 
 	// Start server with graceful shutdown

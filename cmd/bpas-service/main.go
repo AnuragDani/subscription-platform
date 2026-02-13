@@ -616,6 +616,14 @@ func main() {
 	// Testing endpoints
 	r.HandleFunc("/bpas/test", service.testRule).Methods("GET")
 
+	// CRUD endpoints for routing rules (Phase 4)
+	r.HandleFunc("/rules", service.listRulesWithStats).Methods("GET")
+	r.HandleFunc("/rules", service.createRule).Methods("POST")
+	r.HandleFunc("/rules/reorder", service.reorderRules).Methods("POST")
+	r.HandleFunc("/rules/{id}", service.getRule).Methods("GET")
+	r.HandleFunc("/rules/{id}", service.deleteRule).Methods("DELETE")
+	r.HandleFunc("/rules/{id}/toggle", service.toggleRule).Methods("PUT")
+
 	// Admin endpoints
 	r.HandleFunc("/admin/stats", service.getStats).Methods("GET")
 

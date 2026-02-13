@@ -166,7 +166,7 @@ func (tm *TokenManager) CreateToken(ctx context.Context, req *TokenRequest) (*To
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	var response RefreshTokenResponse
+	var response TokenResponse
 	if err := json.Unmarshal(body, &response); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
 	}
@@ -175,7 +175,7 @@ func (tm *TokenManager) CreateToken(ctx context.Context, req *TokenRequest) (*To
 		return &response, &TokenError{
 			Code:    response.ErrorCode,
 			Message: response.ErrorMessage,
-			Type:    "refresh",
+			Type:    "network",
 		}
 	}
 
@@ -403,30 +403,6 @@ func (tm *TokenManager) ValidateAndGetToken(ctx context.Context, networkToken, p
 	}
 
 	return tokenInfo, nil
-}network",
-		}
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	var response TokenResponse
-	if err := json.Unmarshal(body, &response); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-	}
-
-	if resp.StatusCode >= 400 {
-		return &response, &TokenError{
-			Code:    response.ErrorCode,
-			Message: response.ErrorMessage,
-			Type:    "network",
-		}
-	}
-
-	return &response, nil
 }
 
 // ValidateToken validates a network token for a specific processor
@@ -504,4 +480,28 @@ func (tm *TokenManager) RefreshToken(ctx context.Context, networkToken string, e
 		return nil, &TokenError{
 			Code:    "NETWORK_ERROR",
 			Message: fmt.Sprintf("Network error: %v", err),
-			Type:    "
+			Type:    "refresh",
+		}
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var response RefreshTokenResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return &response, &TokenError{
+			Code:    response.ErrorCode,
+			Message: response.ErrorMessage,
+			Type:    "refresh",
+		}
+	}
+
+	return &response, nil
+}
